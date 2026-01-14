@@ -14,9 +14,10 @@ import (
 )
 
 var (
-	cleanAll     bool
-	cleanPending bool
-	cleanForce   bool
+	cleanAll      bool
+	cleanPending  bool
+	cleanConsumed bool // 新增：清理已消费的消息
+	cleanForce    bool
 )
 
 var cleanCmd = &cobra.Command{
@@ -31,6 +32,9 @@ var cleanCmd = &cobra.Command{
   # 清理所有未消费的任务（pending）
   vcp clean --pending -c config.yaml
 
+  # 清理已消费的消息（保留最近 100 条）
+  vcp clean --consumed -c config.yaml
+
   # 清理所有任务（包括历史记录）
   vcp clean --all -c config.yaml
 
@@ -42,6 +46,7 @@ var cleanCmd = &cobra.Command{
 func init() {
 	cleanCmd.Flags().BoolVar(&cleanAll, "all", false, "清理所有任务（包括历史）")
 	cleanCmd.Flags().BoolVar(&cleanPending, "pending", false, "仅清理未消费的任务")
+	cleanCmd.Flags().BoolVar(&cleanConsumed, "consumed", false, "清理已消费的消息（保留最近100条）")
 	cleanCmd.Flags().BoolVar(&cleanForce, "force", false, "强制执行，不需要确认")
 	cleanCmd.Flags().StringVarP(&configFile, "config", "c", "", "配置文件")
 }
@@ -75,25 +80,34 @@ func runClean(cmd *cobra.Command, args []string) {
 		log.Fatalf("获取队列信息失败: %v", err)
 	}
 
+	// 计算等待消费的任务
+	waitingTasks := info.Length - info.Pending
+	if waitingTasks < 0 {
+		waitingTasks = 0
+	}
+
 	fmt.Println()
 	fmt.Println("╔════════════════════════════════════════╗")
 	fmt.Println("║           任务队列状态                 ║")
 	fmt.Println("╠════════════════════════════════════════╣")
-	fmt.Printf("║  队列长度:      %-20d  ║\n", info.Length)
+	fmt.Printf("║  等待消费:      %-20d  ║\n", waitingTasks)
+	fmt.Printf("║  正在处理:      %-20d  ║\n", info.Pending)
+	fmt.Printf("║  队列总数:      %-20d  ║\n", info.Length)
 	fmt.Printf("║  消费者组数:    %-20d  ║\n", info.Groups)
-	fmt.Printf("║  Pending 任务:  %-20d  ║\n", info.Pending)
 	fmt.Println("╚════════════════════════════════════════╝")
 	fmt.Println()
 
 	// 如果没有指定操作，只显示状态
-	if !cleanAll && !cleanPending {
+	if !cleanAll && !cleanPending && !cleanConsumed {
 		fmt.Println("操作选项:")
-		fmt.Println("  --pending    清理未消费任务 (Pending)")
-		fmt.Println("  --all        清理所有任务 (包括历史)")
-		fmt.Println("  --force      强制执行 (不确认)")
+		fmt.Println("  --pending    清理 Pending 任务（正在处理但未完成）")
+		fmt.Println("  --consumed   清理队列（保留最近 100 条）")
+		fmt.Println("  --all        清理所有任务（包括历史记录）")
+		fmt.Println("  --force      强制执行（不确认）")
 		fmt.Println()
 		fmt.Println("示例:")
-		fmt.Println("  vcp clean --pending -c config.yaml")
+		fmt.Println("  vcp clean --consumed -c config.yaml  # 清理已处理的消息")
+		fmt.Println("  vcp clean --pending -c config.yaml   # 清理卡住的任务")
 		fmt.Println("  vcp clean --all --force -c config.yaml")
 		return
 	}
@@ -103,6 +117,8 @@ func runClean(cmd *cobra.Command, args []string) {
 		var prompt string
 		if cleanAll {
 			prompt = "确认清理所有任务和历史记录？此操作不可恢复！(输入 yes 确认): "
+		} else if cleanConsumed {
+			prompt = "确认清理队列（保留最近 100 条）？(输入 yes 确认): "
 		} else {
 			prompt = "确认清理所有 Pending 任务？(输入 yes 确认): "
 		}
@@ -137,6 +153,18 @@ func runClean(cmd *cobra.Command, args []string) {
 			fmt.Printf("  ✓ 已清理 %d 条历史记录\n", count)
 		}
 
+		fmt.Println()
+		fmt.Println("清理完成！")
+	} else if cleanConsumed {
+		fmt.Println("正在清理队列...")
+
+		// 保留最近 100 条
+		trimmed, err := stream.TrimStream(100)
+		if err != nil {
+			log.Fatalf("清理失败: %v", err)
+		}
+
+		fmt.Printf("  ✓ 已清理 %d 条消息（保留最近 100 条）\n", trimmed)
 		fmt.Println()
 		fmt.Println("清理完成！")
 	} else if cleanPending {

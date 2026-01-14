@@ -12,11 +12,12 @@ const (
 	DefaultStreamName    = "vcp:tasks"
 	DefaultConsumerGroup = "gpu_encoders"
 	MaxRetryCount        = 3
+	MaxStreamLength      = 1000 // 保留最近 1000 条消息
 )
 
 type Stream struct {
 	Client *goredis.Client
-	Ctx    context.Context // 改为公开字段
+	Ctx    context.Context
 }
 
 // Task 任务结构 - 由 Producer 完全定义
@@ -42,9 +43,9 @@ type Task struct {
 
 // QueueInfo 队列信息
 type QueueInfo struct {
-	Length  int64
-	Groups  int
-	Pending int64
+	Length  int64 // Stream 总长度（包含已消费）
+	Pending int64 // 待处理任务数
+	Groups  int   // 消费者组数
 }
 
 func NewStream(addr, password string, db int) *Stream {
@@ -160,8 +161,19 @@ func (s *Stream) parseMessages(results []goredis.XStream) []Task {
 	return tasks
 }
 
-// Acknowledge 确认任务完成
+// Acknowledge 确认任务完成（ACK + 删除消息）
 func (s *Stream) Acknowledge(group, messageID string) error {
+	// 先 ACK
+	if err := s.Client.XAck(s.Ctx, DefaultStreamName, group, messageID).Err(); err != nil {
+		return err
+	}
+	// 再删除消息（释放空间）
+	s.Client.XDel(s.Ctx, DefaultStreamName, messageID)
+	return nil
+}
+
+// AcknowledgeOnly 仅 ACK 不删除（用于需要保留历史的场景）
+func (s *Stream) AcknowledgeOnly(group, messageID string) error {
 	return s.Client.XAck(s.Ctx, DefaultStreamName, group, messageID).Err()
 }
 
@@ -180,14 +192,13 @@ func (s *Stream) Close() error {
 	return s.Client.Close()
 }
 
-// GetQueueInfo 获取队列信息
+// GetQueueInfo 获取队列信息（显示真实待处理数）
 func (s *Stream) GetQueueInfo() (*QueueInfo, error) {
 	info := &QueueInfo{}
 
-	// 获取 Stream 长度
+	// 获取 Stream 长度（未消费的消息数）
 	length, err := s.Client.XLen(s.Ctx, DefaultStreamName).Result()
 	if err != nil && err != goredis.Nil {
-		// Stream 可能不存在
 		return info, nil
 	}
 	info.Length = length
@@ -195,17 +206,35 @@ func (s *Stream) GetQueueInfo() (*QueueInfo, error) {
 	// 获取消费者组信息
 	groups, err := s.Client.XInfoGroups(s.Ctx, DefaultStreamName).Result()
 	if err != nil && err != goredis.Nil {
-		// Stream 可能不存在
 		return info, nil
 	}
 	info.Groups = len(groups)
 
-	// 计算 pending 任务数
+	// 计算 pending 任务数（正在处理但未 ACK 的）
 	for _, g := range groups {
 		info.Pending += g.Pending
 	}
 
 	return info, nil
+}
+
+// GetRealQueueLength 获取真正待消费的任务数
+// = Stream 长度 - 已被读取但未 ACK 的（pending）
+func (s *Stream) GetRealQueueLength() (int64, error) {
+	// 获取 Stream 长度
+	length, err := s.Client.XLen(s.Ctx, DefaultStreamName).Result()
+	if err != nil {
+		if err == goredis.Nil {
+			return 0, nil
+		}
+		return 0, err
+	}
+	return length, nil
+}
+
+// TrimStream 清理 Stream，保留最近 N 条消息
+func (s *Stream) TrimStream(maxLen int64) (int64, error) {
+	return s.Client.XTrimMaxLen(s.Ctx, DefaultStreamName, maxLen).Result()
 }
 
 // DeleteStream 删除整个 Stream
@@ -243,7 +272,6 @@ func (s *Stream) DeleteHistory() (int64, error) {
 
 // CleanPendingTasks 清理所有 pending 任务
 func (s *Stream) CleanPendingTasks(group string) (int64, error) {
-	// 获取所有 pending 消息
 	pending, err := s.Client.XPendingExt(s.Ctx, &goredis.XPendingExtArgs{
 		Stream: DefaultStreamName,
 		Group:  group,
@@ -261,7 +289,7 @@ func (s *Stream) CleanPendingTasks(group string) (int64, error) {
 
 	var count int64
 	for _, p := range pending {
-		// ACK 每个 pending 消息
+		// ACK + 删除
 		if err := s.Acknowledge(group, p.ID); err == nil {
 			count++
 		}
@@ -290,7 +318,6 @@ func (s *Stream) GetPendingTasks(group string, count int64) ([]goredis.XPendingE
 func (s *Stream) GetStreamInfo() (map[string]interface{}, error) {
 	info := make(map[string]interface{})
 
-	// Stream 信息
 	streamInfo, err := s.Client.XInfoStream(s.Ctx, DefaultStreamName).Result()
 	if err != nil {
 		if err == goredis.Nil {
