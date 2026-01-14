@@ -1,9 +1,27 @@
 # VCP 配置文件
 
 redis:
-  address: "localhost:6379"
-  password: ""
-  db: 0
+  address: "gz-crs-gzsqj62t.sql.tencentcdb.com:25078"
+  password: "Admin@798!"
+  db: 7
+
+# 自定义 FFmpeg 预设模板
+# 可以新增预设，也可以覆盖内置预设
+presets:
+  # 自定义高码率预设
+  high-bitrate: "-c:v h264_nvenc -preset p4 -b:v 20M -maxrate 25M -bufsize 40M -c:a aac -b:a 256k -movflags +faststart"
+  
+  # 自定义低码率预设（适合网络传输）
+  low-bitrate: "-c:v h264_nvenc -preset p4 -b:v 3M -c:a aac -b:a 96k -movflags +faststart"
+  
+  # 4K 视频预设
+  4k-nvenc: "-c:v hevc_nvenc -preset p5 -b:v 30M -maxrate 40M -bufsize 60M -c:a aac -b:a 192k -movflags +faststart"
+  
+  # 仅提取音频
+  audio-only: "-vn -c:a aac -b:a 192k"
+  
+  # 覆盖内置 h264-nvenc（示例）
+  # h264-nvenc: "-c:v h264_nvenc -preset p6 -b:v 12M -c:a aac -b:a 160k -movflags +faststart"
 
 # Producer 配置 - 控制所有编码参数
 producer:
@@ -12,8 +30,8 @@ producer:
   output_directory: "/data/encoded"        # Consumer 输出目录
   output_prefix: ""                        # 输出文件名前缀（可选）
   watch_mode: "new"                        # new=仅新增, all=包含现有
-  ffmpeg_preset: "h264-nvenc"              # 预设: h264-nvenc, h265-nvenc, h264-cpu, copy
-  ffmpeg_args: ""                          # 自定义参数（覆盖预设）
+  ffmpeg_preset: "h264-nvenc"              # 使用预设名称
+  ffmpeg_args: ""                          # 或直接指定参数（覆盖 preset）
   verify_output: true                      # 是否校验输出
   keep_local: false                        # 是否保留本地原文件
 
