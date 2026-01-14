@@ -24,7 +24,6 @@ import (
 var (
 	watchDir     string
 	sharedDir    string
-	configFile   string
 	keepLocal    bool
 	outputDir    string
 	outputPrefix string
@@ -151,17 +150,17 @@ func runProducer(cmd *cobra.Command, args []string) {
 		cancel()
 	}()
 
-    // 获取 Redis 配置
-    redisAddr := "localhost:6379"
-    redisPassword := ""
-    redisDB := 0
-    if cfg != nil {
-        redisAddr = cfg.GetRedisAddr()
-        redisPassword = cfg.Redis.Password
-        redisDB = cfg.Redis.DB
-    }
-    stream := internalredis.NewStream(redisAddr, redisPassword, redisDB)
-    defer stream.Close()
+	// 获取 Redis 配置
+	redisAddr := "localhost:6379"
+	redisPassword := ""
+	redisDB := 0
+	if cfg != nil {
+		redisAddr = cfg.GetRedisAddr()
+		redisPassword = cfg.Redis.Password
+		redisDB = cfg.Redis.DB
+	}
+	stream := internalredis.NewStream(redisAddr, redisPassword, redisDB)
+	defer stream.Close()
 
 	if err := stream.Ping(); err != nil {
 		log.Fatalf("Redis 连接失败: %v", err)
@@ -177,7 +176,7 @@ func runProducer(cmd *cobra.Command, args []string) {
 	log.Printf("  共享存储:   %s", sharedDir)
 	log.Printf("  输出目录:   %s", outputDir)
 	log.Printf("  监听模式:   %s", watchMode)
-	log.Printf("  FFmpeg:     %s", truncateStr(finalFFmpegArgs, 60))
+	log.Printf("  FFmpeg:     %s", truncateStrProducer(finalFFmpegArgs, 60))
 	log.Printf("  校验输出:   %v", verifyOutput)
 
 	taskConfig := &taskConfiguration{
@@ -239,8 +238,10 @@ func resolveFFmpegArgs(cfg *config.Config) string {
 
 	// 2. 命令行指定预设
 	if ffmpegPreset != "" {
-		if args, ok := cfg.GetPreset(ffmpegPreset); ok {
-			return args
+		if cfg != nil {
+			if args, ok := cfg.GetPreset(ffmpegPreset); ok {
+				return args
+			}
 		}
 		// 如果没有配置文件，尝试内置预设
 		if args, ok := config.GetBuiltinPresets()[ffmpegPreset]; ok {
@@ -283,7 +284,7 @@ func printAvailablePresets(cfg *config.Config) {
 	sort.Strings(builtinKeys)
 	for _, name := range builtinKeys {
 		args := config.GetBuiltinPresets()[name]
-		fmt.Printf("  %-16s %s\n", name, truncateStr(args, 60))
+		fmt.Printf("  %-16s %s\n", name, truncateStrProducer(args, 60))
 	}
 
 	// 自定义预设
@@ -302,7 +303,7 @@ func printAvailablePresets(cfg *config.Config) {
 			if _, ok := config.GetBuiltinPresets()[name]; ok {
 				suffix = " (覆盖内置)"
 			}
-			fmt.Printf("  %-16s %s%s\n", name, truncateStr(args, 50), suffix)
+			fmt.Printf("  %-16s %s%s\n", name, truncateStrProducer(args, 50), suffix)
 		}
 	}
 
@@ -496,7 +497,8 @@ func getLocalIP() string {
 	return "unknown"
 }
 
-func truncateStr(s string, maxLen int) string {
+// truncateStrProducer 截断字符串（producer专用）
+func truncateStrProducer(s string, maxLen int) string {
 	if len(s) <= maxLen {
 		return s
 	}

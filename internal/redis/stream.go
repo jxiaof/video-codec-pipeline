@@ -16,7 +16,7 @@ const (
 
 type Stream struct {
 	Client *goredis.Client
-	ctx    context.Context
+	Ctx    context.Context // 改为公开字段
 }
 
 // Task 任务结构 - 由 Producer 完全定义
@@ -40,18 +40,25 @@ type Task struct {
 	VerifyOutput bool   // 是否校验输出
 }
 
+// QueueInfo 队列信息
+type QueueInfo struct {
+	Length  int64
+	Groups  int
+	Pending int64
+}
+
 func NewStream(addr, password string, db int) *Stream {
 	rdb := goredis.NewClient(&goredis.Options{
 		Addr:     addr,
 		Password: password,
 		DB:       db,
 	})
-	return &Stream{Client: rdb, ctx: context.Background()}
+	return &Stream{Client: rdb, Ctx: context.Background()}
 }
 
 // CreateConsumerGroup 创建消费者组
 func (s *Stream) CreateConsumerGroup(stream, group string) error {
-	err := s.Client.XGroupCreateMkStream(s.ctx, stream, group, "0").Err()
+	err := s.Client.XGroupCreateMkStream(s.Ctx, stream, group, "0").Err()
 	if err != nil && err.Error() != "BUSYGROUP Consumer Group name already exists" {
 		return err
 	}
@@ -60,7 +67,7 @@ func (s *Stream) CreateConsumerGroup(stream, group string) error {
 
 // Publish 发布任务
 func (s *Stream) Publish(task Task) (string, error) {
-	return s.Client.XAdd(s.ctx, &goredis.XAddArgs{
+	return s.Client.XAdd(s.Ctx, &goredis.XAddArgs{
 		Stream: DefaultStreamName,
 		Values: map[string]interface{}{
 			"task_id":       task.ID,
@@ -78,7 +85,7 @@ func (s *Stream) Publish(task Task) (string, error) {
 
 // ReadGroup 从消费者组读取任务
 func (s *Stream) ReadGroup(group, consumer string, count int64, block time.Duration) ([]Task, error) {
-	results, err := s.Client.XReadGroup(s.ctx, &goredis.XReadGroupArgs{
+	results, err := s.Client.XReadGroup(s.Ctx, &goredis.XReadGroupArgs{
 		Group:    group,
 		Consumer: consumer,
 		Streams:  []string{DefaultStreamName, ">"},
@@ -98,7 +105,7 @@ func (s *Stream) ReadGroup(group, consumer string, count int64, block time.Durat
 
 // ReadPendingTasks 读取 pending 任务（用于故障恢复）
 func (s *Stream) ReadPendingTasks(group, consumer string, count int64) ([]Task, error) {
-	results, err := s.Client.XReadGroup(s.ctx, &goredis.XReadGroupArgs{
+	results, err := s.Client.XReadGroup(s.Ctx, &goredis.XReadGroupArgs{
 		Group:    group,
 		Consumer: consumer,
 		Streams:  []string{DefaultStreamName, "0"},
@@ -155,7 +162,7 @@ func (s *Stream) parseMessages(results []goredis.XStream) []Task {
 
 // Acknowledge 确认任务完成
 func (s *Stream) Acknowledge(group, messageID string) error {
-	return s.Client.XAck(s.ctx, DefaultStreamName, group, messageID).Err()
+	return s.Client.XAck(s.Ctx, DefaultStreamName, group, messageID).Err()
 }
 
 // Retry 重新发布任务（用于重试）
@@ -166,11 +173,157 @@ func (s *Stream) Retry(task Task) error {
 }
 
 func (s *Stream) Ping() error {
-	return s.Client.Ping(s.ctx).Err()
+	return s.Client.Ping(s.Ctx).Err()
 }
 
 func (s *Stream) Close() error {
 	return s.Client.Close()
+}
+
+// GetQueueInfo 获取队列信息
+func (s *Stream) GetQueueInfo() (*QueueInfo, error) {
+	info := &QueueInfo{}
+
+	// 获取 Stream 长度
+	length, err := s.Client.XLen(s.Ctx, DefaultStreamName).Result()
+	if err != nil && err != goredis.Nil {
+		// Stream 可能不存在
+		return info, nil
+	}
+	info.Length = length
+
+	// 获取消费者组信息
+	groups, err := s.Client.XInfoGroups(s.Ctx, DefaultStreamName).Result()
+	if err != nil && err != goredis.Nil {
+		// Stream 可能不存在
+		return info, nil
+	}
+	info.Groups = len(groups)
+
+	// 计算 pending 任务数
+	for _, g := range groups {
+		info.Pending += g.Pending
+	}
+
+	return info, nil
+}
+
+// DeleteStream 删除整个 Stream
+func (s *Stream) DeleteStream() error {
+	return s.Client.Del(s.Ctx, DefaultStreamName).Err()
+}
+
+// DeleteHistory 删除历史记录
+func (s *Stream) DeleteHistory() (int64, error) {
+	var count int64
+
+	// 删除历史索引
+	if err := s.Client.Del(s.Ctx, HistoryIndexKey).Err(); err != nil {
+		return count, err
+	}
+
+	// 删除所有历史记录键
+	iter := s.Client.Scan(s.Ctx, 0, HistoryKeyPrefix+"*", 1000).Iterator()
+	var keys []string
+	for iter.Next(s.Ctx) {
+		keys = append(keys, iter.Val())
+	}
+	if err := iter.Err(); err != nil {
+		return count, err
+	}
+
+	if len(keys) > 0 {
+		if err := s.Client.Del(s.Ctx, keys...).Err(); err != nil {
+			return count, err
+		}
+		count = int64(len(keys))
+	}
+	return count, nil
+}
+
+// CleanPendingTasks 清理所有 pending 任务
+func (s *Stream) CleanPendingTasks(group string) (int64, error) {
+	// 获取所有 pending 消息
+	pending, err := s.Client.XPendingExt(s.Ctx, &goredis.XPendingExtArgs{
+		Stream: DefaultStreamName,
+		Group:  group,
+		Start:  "-",
+		End:    "+",
+		Count:  10000,
+	}).Result()
+
+	if err != nil {
+		if err == goredis.Nil {
+			return 0, nil
+		}
+		return 0, err
+	}
+
+	var count int64
+	for _, p := range pending {
+		// ACK 每个 pending 消息
+		if err := s.Acknowledge(group, p.ID); err == nil {
+			count++
+		}
+	}
+
+	return count, nil
+}
+
+// GetPendingTasks 获取 pending 任务列表
+func (s *Stream) GetPendingTasks(group string, count int64) ([]goredis.XPendingExt, error) {
+	pending, err := s.Client.XPendingExt(s.Ctx, &goredis.XPendingExtArgs{
+		Stream: DefaultStreamName,
+		Group:  group,
+		Start:  "-",
+		End:    "+",
+		Count:  count,
+	}).Result()
+
+	if err == goredis.Nil {
+		return nil, nil
+	}
+	return pending, err
+}
+
+// GetStreamInfo 获取 Stream 详细信息
+func (s *Stream) GetStreamInfo() (map[string]interface{}, error) {
+	info := make(map[string]interface{})
+
+	// Stream 信息
+	streamInfo, err := s.Client.XInfoStream(s.Ctx, DefaultStreamName).Result()
+	if err != nil {
+		if err == goredis.Nil {
+			info["exists"] = false
+			return info, nil
+		}
+		return nil, err
+	}
+
+	info["exists"] = true
+	info["length"] = streamInfo.Length
+	info["first_entry"] = streamInfo.FirstEntry.ID
+	info["last_entry"] = streamInfo.LastEntry.ID
+
+	return info, nil
+}
+
+// GetConsumerGroups 获取消费者组列表
+func (s *Stream) GetConsumerGroups() ([]goredis.XInfoGroup, error) {
+	groups, err := s.Client.XInfoGroups(s.Ctx, DefaultStreamName).Result()
+	if err == goredis.Nil {
+		return nil, nil
+	}
+	return groups, err
+}
+
+// GetConsumers 获取指定组的消费者列表
+func (s *Stream) GetConsumers(group string) ([]goredis.XInfoConsumer, error) {
+	consumers, err := s.Client.XInfoConsumers(s.Ctx, DefaultStreamName, group).Result()
+	if err == goredis.Nil {
+		return nil, nil
+	}
+	return consumers, err
 }
 
 func boolToStr(b bool) string {

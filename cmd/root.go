@@ -21,16 +21,23 @@ var rootCmd = &cobra.Command{
   - producer: 监听目录，将视频复制到共享存储并发布任务
   - consumer: 消费任务，使用 NVENC 硬件编码视频
   - stats:    查询任务历史和统计信息
+  - clean:    清理任务队列
 
 示例：
   # 启动生产者（H800 端）
-  vcp producer --watch /data/videos --shared /mnt/nfs/videos
+  vcp producer --watch /data/videos --shared /mnt/nfs/videos -o /data/out
 
   # 启动消费者（RTX 5090 端）
-  vcp consumer --output /data/encoded
+  vcp consumer
 
   # 查询统计信息
-  vcp stats --days 7`,
+  vcp stats -c config.yaml
+
+  # 查看 pending 任务
+  vcp stats --pending -c config.yaml
+  
+  # 清理任务队列
+  vcp clean --pending -c config.yaml`,
 }
 
 // Execute 执行根命令
@@ -45,4 +52,5 @@ func init() {
 	rootCmd.AddCommand(producerCmd)
 	rootCmd.AddCommand(consumerCmd)
 	rootCmd.AddCommand(statsCmd)
+	rootCmd.AddCommand(cleanCmd)
 }

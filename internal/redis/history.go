@@ -184,7 +184,7 @@ func (hm *HistoryManager) GetStats(startTime, endTime time.Time) (map[string]int
 	}
 
 	if completedCount > 0 {
-		stats["avg_duration"] = (totalDuration / time.Duration(completedCount)).String()
+		stats["avg_duration"] = (totalDuration / time.Duration(completedCount)).Round(time.Second).String()
 	} else {
 		stats["avg_duration"] = "N/A"
 	}
