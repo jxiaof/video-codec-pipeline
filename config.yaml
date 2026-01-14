@@ -1,0 +1,23 @@
+# VCP 配置文件
+
+redis:
+  address: "localhost:6379"
+  password: ""
+  db: 0
+
+# Producer 配置 - 控制所有编码参数
+producer:
+  watch_directory: "/data/raw_videos"      # 监听目录
+  shared_directory: "/mnt/shared/input"    # 共享存储
+  output_directory: "/data/encoded"        # Consumer 输出目录
+  output_prefix: ""                        # 输出文件名前缀（可选）
+  watch_mode: "new"                        # new=仅新增, all=包含现有
+  ffmpeg_preset: "h264-nvenc"              # 预设: h264-nvenc, h265-nvenc, h264-cpu, copy
+  ffmpeg_args: ""                          # 自定义参数（覆盖预设）
+  verify_output: true                      # 是否校验输出
+  keep_local: false                        # 是否保留本地原文件
+
+# Consumer 配置 - 只需配置基本信息
+consumer:
+  name: ""                                 # 消费者名称（留空自动生成）
+  concurrency: 1                           # 并发数
