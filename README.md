@@ -5,14 +5,14 @@
 ## 架构
 
 ```
-Producer (H800) 决定一切:
+Producer (H800/A800/H200) 决定一切:
 ├── 输入文件
 ├── 输出目录
 ├── 输出文件名
 ├── FFmpeg 参数
 └── 是否校验
 
-Consumer (5090) 只负责执行
+Consumer (5090/4090) 只负责执行
 ```
 
 ## 文件流转
@@ -109,7 +109,7 @@ CUDA_VISIBLE_DEVICES=0 ./vcp consumer -n gpu0
 CUDA_VISIBLE_DEVICES=1 ./vcp consumer -n gpu1
 ```
 
-## Mermaid 时序图
+## 时序图
 
 ```mermaid
 sequenceDiagram
