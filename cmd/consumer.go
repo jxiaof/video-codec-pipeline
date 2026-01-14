@@ -85,12 +85,16 @@ func runConsumer(cmd *cobra.Command, args []string) {
 		cancel()
 	}()
 
-	redisAddr := "localhost:6379"
-	if cfg != nil {
-		redisAddr = cfg.GetRedisAddr()
-	}
-	stream := internalredis.NewStream(redisAddr, "", 0)
-	defer stream.Close()
+    redisAddr := "localhost:6379"
+    redisPassword := ""
+    redisDB := 0
+    if cfg != nil {
+        redisAddr = cfg.GetRedisAddr()
+        redisPassword = cfg.Redis.Password
+        redisDB = cfg.Redis.DB
+    }
+    stream := internalredis.NewStream(redisAddr, redisPassword, redisDB)
+    defer stream.Close()
 
 	if err := stream.Ping(); err != nil {
 		log.Fatalf("Redis 连接失败: %v", err)

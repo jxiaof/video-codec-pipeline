@@ -35,13 +35,16 @@ func runStats(cmd *cobra.Command, args []string) {
 		cfg, _ = config.LoadConfig(configFile)
 	}
 
-	redisAddr := "localhost:6379"
-	if cfg != nil {
-		redisAddr = cfg.GetRedisAddr()
-	}
-
-	stream := internalredis.NewStream(redisAddr, "", 0)
-	defer stream.Close()
+    redisAddr := "localhost:6379"
+    redisPassword := ""
+    redisDB := 0
+    if cfg != nil {
+        redisAddr = cfg.GetRedisAddr()
+        redisPassword = cfg.Redis.Password
+        redisDB = cfg.Redis.DB
+    }
+    stream := internalredis.NewStream(redisAddr, redisPassword, redisDB)
+    defer stream.Close()
 
 	historyMgr := internalredis.NewHistoryManager(stream.Client, 7)
 
