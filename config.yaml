@@ -1,8 +1,8 @@
 # VCP 配置文件
 
 redis:
-  address: "gz-crs-gzsqj62t.sql.tencentcdb.com:25078"
-  password: "Admin@798!"
+  address: "localhost:6379"
+  password: ""
   db: 7
   stream_max_length: 1000  # Stream 最大保留消息数
   publish_rate_limit: 100   # 每秒最多发布的任务数
