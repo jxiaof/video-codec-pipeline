@@ -14,9 +14,9 @@ import (
 
 var (
 	statsDays    int
-	statsTask    string
 	showPending  bool
 	showConsumer bool
+	statsTask    string
 )
 
 var statsCmd = &cobra.Command{
@@ -43,10 +43,10 @@ var statsCmd = &cobra.Command{
 }
 
 func init() {
-	statsCmd.Flags().IntVarP(&statsDays, "days", "d", 7, "查询天数")
-	statsCmd.Flags().StringVarP(&statsTask, "task", "t", "", "查询指定任务")
-	statsCmd.Flags().BoolVar(&showPending, "pending", false, "显示 pending 任务列表")
-	statsCmd.Flags().BoolVar(&showConsumer, "consumers", false, "显示消费者信息")
+	statsCmd.Flags().IntVar(&statsDays, "days", 7, "统计天数")
+	statsCmd.Flags().BoolVar(&showPending, "pending", false, "显示 pending 任务")
+	statsCmd.Flags().BoolVar(&showConsumer, "consumer", false, "显示消费者信息")
+	statsCmd.Flags().StringVar(&statsTask, "task", "", "查询指定任务")
 	statsCmd.Flags().StringVarP(&configFile, "config", "c", "", "配置文件")
 	statsCmd.Flags().StringVar(&logLevel, "log-level", "info", "日志级别: debug/info/warn/error")
 }
@@ -140,15 +140,17 @@ func runStats(cmd *cobra.Command, args []string) {
 	fmt.Println("=== VCP Task Statistics ===")
 	fmt.Println()
 	fmt.Println("[Real-time Queue Status]")
-	fmt.Printf("  Queue Length:     %d\n", queueInfo.Length)
-	fmt.Printf("  Pending (Unacked): %d\n", len(realTimePending))
+	fmt.Printf("  Queue Length:      %d tasks\n", queueInfo.Length)
+	fmt.Printf("  Processing:        %d (unacked by consumer)\n", len(realTimePending))
 	fmt.Printf("  Consumer Groups:   %d\n", queueInfo.Groups)
 	fmt.Println()
 	fmt.Printf("[History Stats] Last %d Days\n", statsDays)
 	fmt.Printf("  Total Tasks:   %d\n", stats["total"])
 	fmt.Printf("  Completed:     %d\n", stats["completed"])
 	fmt.Printf("  Failed:        %d\n", stats["failed"])
-	fmt.Printf("  Avg Duration:  %s\n", stats["avg_duration"])
+	fmt.Printf("  Avg Duration:  %s (只显示已完成任务)\n", stats["avg_duration"])
+	fmt.Println()
+	fmt.Println("Note: 历史统计依赖于 Consumer 的记录。如果统计为 0 说明任务正在进行，可用 --pending 查看实时任务。")
 	fmt.Println()
 
 	// 显示实时的待处理任务

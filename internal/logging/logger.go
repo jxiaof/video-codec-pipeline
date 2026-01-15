@@ -145,6 +145,23 @@ func formatDuration(d time.Duration) string {
 	}
 }
 
+// FormatDuration 格式化时长，保留3位小数（导出供外部使用）
+func FormatDuration(d time.Duration) string {
+	totalSeconds := d.Seconds()
+
+	if totalSeconds < 1 {
+		return fmt.Sprintf("%dms", d.Milliseconds())
+	} else if totalSeconds < 60 {
+		return fmt.Sprintf("%.3fs", totalSeconds)
+	} else if totalSeconds < 3600 {
+		minutes := totalSeconds / 60
+		return fmt.Sprintf("%.3fm", minutes)
+	} else {
+		hours := totalSeconds / 3600
+		return fmt.Sprintf("%.3fh", hours)
+	}
+}
+
 // init 初始化日志
 func init() {
 	// 禁用标准 log 的时间前缀，由我们自己控制

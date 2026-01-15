@@ -210,7 +210,7 @@ func runConsumer(cmd *cobra.Command, args []string) {
 	// 打印统计
 	elapsed := time.Since(startupTime)
 	logger.Info("consumer_shutdown elapsed=%s total=%d success=%d failed=%d",
-		formatDuration(elapsed),
+		logging.FormatDuration(elapsed),
 		atomic.LoadInt64(&totalProcessed),
 		atomic.LoadInt64(&totalSuccess),
 		atomic.LoadInt64(&totalFailed))
@@ -243,7 +243,7 @@ func processTask(ctx context.Context, stream *internalredis.Stream, task interna
 		}
 		return false
 	}
-	logger.Debug("input_file_ready wait_time=%s", formatDuration(time.Since(waitStart)))
+	logger.Debug("input_file_ready wait_time=%s", logging.FormatDuration(time.Since(waitStart)))
 
 	// 确保输出目录存在
 	if err := os.MkdirAll(task.OutputDir, 0755); err != nil {
@@ -267,7 +267,7 @@ func processTask(ctx context.Context, stream *internalredis.Stream, task interna
 		}
 		return false
 	}
-	logger.Debug("ffmpeg_complete encode_time=%s", formatDuration(time.Since(encodeStart)))
+	logger.Debug("ffmpeg_complete encode_time=%s", logging.FormatDuration(time.Since(encodeStart)))
 
 	// 校验输出
 	if task.VerifyOutput {
@@ -281,7 +281,7 @@ func processTask(ctx context.Context, stream *internalredis.Stream, task interna
 			}
 			return false
 		}
-		logger.Debug("verify_output_complete verify_time=%s", formatDuration(time.Since(verifyStart)))
+		logger.Debug("verify_output_complete verify_time=%s", logging.FormatDuration(time.Since(verifyStart)))
 	}
 
 	// 删除源文件（在 ACK 之前）
@@ -433,22 +433,5 @@ func formatFileSize(size int64) string {
 		return fmt.Sprintf("%.2f KB", float64(size)/float64(KB))
 	default:
 		return fmt.Sprintf("%d B", size)
-	}
-}
-
-// formatDuration 格式化时长，保留3位小数
-func formatDuration(d time.Duration) string {
-	totalSeconds := d.Seconds()
-
-	if totalSeconds < 1 {
-		return fmt.Sprintf("%dms", d.Milliseconds())
-	} else if totalSeconds < 60 {
-		return fmt.Sprintf("%.3fs", totalSeconds)
-	} else if totalSeconds < 3600 {
-		minutes := totalSeconds / 60
-		return fmt.Sprintf("%.3fm", minutes)
-	} else {
-		hours := totalSeconds / 3600
-		return fmt.Sprintf("%.3fh", hours)
 	}
 }
