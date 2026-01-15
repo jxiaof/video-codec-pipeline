@@ -32,7 +32,7 @@ var (
 	ffmpegArgs   string
 	verifyOutput bool
 	watchMode    string
-	listPresets  bool // 列出所有可用预设
+	listPresets  bool
 )
 
 var producerCmd = &cobra.Command{
@@ -84,10 +84,14 @@ func init() {
 	producerCmd.Flags().BoolVar(&verifyOutput, "verify", true, "Consumer 是否校验输出")
 	producerCmd.Flags().BoolVar(&keepLocal, "keep", false, "保留本地原文件（默认移动）")
 	producerCmd.Flags().StringVarP(&configFile, "config", "c", "", "配置文件路径")
+	producerCmd.Flags().StringVar(&logLevel, "log-level", "info", "日志级别: debug/info/warn/error")
 	producerCmd.Flags().BoolVar(&listPresets, "list-presets", false, "列出所有可用预设")
 }
 
 func runProducer(cmd *cobra.Command, args []string) {
+	// 设置日志级别
+	logging.SetLogLevel(logLevel)
+
 	logger := logging.NewLogger("producer")
 
 	// 加载配置文件
@@ -149,7 +153,7 @@ func runProducer(cmd *cobra.Command, args []string) {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sigCh
-		log.Println("收到退出信号...")
+		logger.Info("signal_received action=shutdown")
 		cancel()
 	}()
 
@@ -174,8 +178,8 @@ func runProducer(cmd *cobra.Command, args []string) {
 
 	localIP := getLocalIP()
 
-	logger.Info("producer_start watch_dir=%s shared_dir=%s output_dir=%s", watchDir, sharedDir, outputDir)
-	logger.Info("config mode=%s ffmpeg_preset=%s verify_output=%v", watchMode, ffmpegPreset, verifyOutput)
+	logger.Info("producer_started watch_dir=%s shared_dir=%s output_dir=%s", watchDir, sharedDir, outputDir)
+	logger.Info("config mode=%s ffmpeg_preset=%s verify_output=%v log_level=%s", watchMode, ffmpegPreset, verifyOutput, logLevel)
 
 	taskConfig := &taskConfiguration{
 		outputDir:    outputDir,
@@ -188,6 +192,7 @@ func runProducer(cmd *cobra.Command, args []string) {
 
 	// 模式 all：先处理现有文件
 	if watchMode == "all" {
+		logger.Info("processing_existing_files mode=all")
 		processExistingFiles(ctx, stream, taskConfig)
 	}
 
@@ -202,26 +207,26 @@ func runProducer(cmd *cobra.Command, args []string) {
 		log.Fatalf("添加监听目录失败: %v", err)
 	}
 
-	log.Println("开始监听新文件...")
+	logger.Info("watching_directory path=%s", watchDir)
 
 	for {
 		select {
 		case <-ctx.Done():
-			log.Println("Producer 退出")
+			logger.Info("producer_shutdown")
 			return
 		case event, ok := <-watcher.Events:
 			if !ok {
 				return
 			}
 			if event.Op&fsnotify.Create == fsnotify.Create && isVideoFile(event.Name) {
-				log.Printf("检测到新文件: %s", filepath.Base(event.Name))
+				logger.Debug("file_detected path=%s", filepath.Base(event.Name))
 				go handleNewFile(ctx, stream, event.Name, taskConfig)
 			}
 		case err, ok := <-watcher.Errors:
 			if !ok {
 				return
 			}
-			log.Printf("监听错误: %v", err)
+			logger.Error("watcher_error error=%v", err)
 		}
 	}
 }
@@ -270,11 +275,11 @@ func resolveFFmpegArgs(cfg *config.Config) string {
 
 // printAvailablePresets 打印所有可用预设
 func printAvailablePresets(cfg *config.Config) {
-	fmt.Println("========== 可用 FFmpeg 预设 ==========")
+	fmt.Println("Available FFmpeg Presets:")
 	fmt.Println()
 
 	// 内置预设
-	fmt.Println("【内置预设】")
+	fmt.Println("[Built-in Presets]")
 	builtinKeys := make([]string, 0)
 	for k := range config.GetBuiltinPresets() {
 		builtinKeys = append(builtinKeys, k)
@@ -288,7 +293,7 @@ func printAvailablePresets(cfg *config.Config) {
 	// 自定义预设
 	if cfg != nil && len(cfg.Presets) > 0 {
 		fmt.Println()
-		fmt.Println("【自定义预设】（来自配置文件）")
+		fmt.Println("[Custom Presets]")
 		customKeys := make([]string, 0)
 		for k := range cfg.Presets {
 			customKeys = append(customKeys, k)
@@ -296,19 +301,18 @@ func printAvailablePresets(cfg *config.Config) {
 		sort.Strings(customKeys)
 		for _, name := range customKeys {
 			args := cfg.Presets[name]
-			// 标记是否覆盖了内置预设
 			suffix := ""
 			if _, ok := config.GetBuiltinPresets()[name]; ok {
-				suffix = " (覆盖内置)"
+				suffix = " (override)"
 			}
 			fmt.Printf("  %-16s %s%s\n", name, truncateStrProducer(args, 50), suffix)
 		}
 	}
 
 	fmt.Println()
-	fmt.Println("使用方法:")
-	fmt.Println("  vcp producer -p <预设名称> ...")
-	fmt.Println("  vcp producer --ffmpeg-args \"<自定义参数>\" ...")
+	fmt.Println("Usage:")
+	fmt.Println("  vcp producer -p <preset_name> ...")
+	fmt.Println("  vcp producer --ffmpeg-args \"<custom_args>\" ...")
 }
 
 // taskConfiguration 任务配置
@@ -323,9 +327,11 @@ type taskConfiguration struct {
 
 // processExistingFiles 处理现有文件
 func processExistingFiles(ctx context.Context, stream *internalredis.Stream, cfg *taskConfiguration) {
+	logger := logging.NewLogger("producer")
+
 	entries, err := os.ReadDir(watchDir)
 	if err != nil {
-		log.Printf("读取目录失败: %v", err)
+		logger.Error("read_directory_failed error=%v", err)
 		return
 	}
 
@@ -337,11 +343,11 @@ func processExistingFiles(ctx context.Context, stream *internalredis.Stream, cfg
 	}
 
 	if len(videoFiles) == 0 {
-		log.Println("未找到现有视频文件")
+		logger.Info("no_existing_files_found")
 		return
 	}
 
-	log.Printf("发现 %d 个现有视频文件，开始处理...", len(videoFiles))
+	logger.Info("processing_existing_files count=%d", len(videoFiles))
 
 	for _, filePath := range videoFiles {
 		select {
@@ -404,7 +410,7 @@ func handleNewFile(ctx context.Context, stream *internalredis.Stream, filePath s
 		return
 	}
 
-	logger.Info("task_published task_id=%s original_name=%s output=%s/%s", taskID, originalName, cfg.outputDir, outputName)
+	logger.Info("task_published task_id=%s file=%s output=%s/%s", taskID, originalName, cfg.outputDir, outputName)
 }
 
 // generateOutputName 生成输出文件名

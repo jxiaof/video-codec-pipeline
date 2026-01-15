@@ -10,13 +10,14 @@ import (
 	"github.com/spf13/cobra"
 
 	"video-codec-pipeline/internal/config"
+	"video-codec-pipeline/internal/logging"
 	internalredis "video-codec-pipeline/internal/redis"
 )
 
 var (
 	cleanAll      bool
 	cleanPending  bool
-	cleanConsumed bool // 新增：清理已消费的消息
+	cleanConsumed bool
 	cleanForce    bool
 )
 
@@ -49,9 +50,12 @@ func init() {
 	cleanCmd.Flags().BoolVar(&cleanConsumed, "consumed", false, "清理已消费的消息（保留最近100条）")
 	cleanCmd.Flags().BoolVar(&cleanForce, "force", false, "强制执行，不需要确认")
 	cleanCmd.Flags().StringVarP(&configFile, "config", "c", "", "配置文件")
+	cleanCmd.Flags().StringVar(&logLevel, "log-level", "info", "日志级别: debug/info/warn/error")
 }
 
 func runClean(cmd *cobra.Command, args []string) {
+	logging.SetLogLevel(logLevel)
+
 	var cfg *config.Config
 	if configFile != "" {
 		cfg, _ = config.LoadConfig(configFile)

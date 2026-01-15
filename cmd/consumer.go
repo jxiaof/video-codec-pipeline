@@ -51,9 +51,13 @@ func init() {
 	consumerCmd.Flags().StringVarP(&consumerName, "name", "n", "", "消费者名称（默认自动生成）")
 	consumerCmd.Flags().IntVarP(&concurrency, "concurrency", "j", 1, "并发数（默认 1）")
 	consumerCmd.Flags().StringVarP(&configFile, "config", "c", "", "配置文件")
+	consumerCmd.Flags().StringVar(&logLevel, "log-level", "info", "日志级别: debug/info/warn/error")
 }
 
 func runConsumer(cmd *cobra.Command, args []string) {
+	// 设置日志级别
+	logging.SetLogLevel(logLevel)
+
 	var cfg *config.Config
 	if configFile != "" {
 		var err error
@@ -101,11 +105,8 @@ func runConsumer(cmd *cobra.Command, args []string) {
 
 	stream.CreateConsumerGroup(internalredis.DefaultStreamName, internalredis.DefaultConsumerGroup)
 
-	log.Printf("Consumer [%s] 已启动", consumerName)
-	log.Printf("  并发数: %d", concurrency)
-	log.Printf("  Redis:  %s", redisAddr)
-	log.Println("  等待 Producer 分配任务...")
-	log.Println("  按 Ctrl+C 退出")
+	logger := logging.NewLogger("consumer")
+	logger.Info("consumer_started name=%s concurrency=%d redis=%s log_level=%s", consumerName, concurrency, redisAddr, logLevel)
 
 	// 统计信息（使用原子操作）
 	var totalProcessed, totalSuccess, totalFailed int64
@@ -130,13 +131,13 @@ func runConsumer(cmd *cobra.Command, args []string) {
 					}
 					// 验证任务有效性
 					if task.ID == "" || task.InputPath == "" {
-						log.Printf("[Worker %d] 跳过无效任务", id)
+						logger.Debug("skip_invalid_task")
 						if task.MessageID != "" {
 							stream.Acknowledge(internalredis.DefaultConsumerGroup, task.MessageID)
 						}
 						continue
 					}
-					log.Printf("[Worker %d] 处理: %s (%s)", id, task.ID, task.OriginalName)
+					logger.Debug("worker=%d processing task_id=%s file=%s", id, task.ID, task.OriginalName)
 					success := processTask(ctx, stream, task)
 					atomic.AddInt64(&totalProcessed, 1)
 					if success {
@@ -161,7 +162,7 @@ func runConsumer(cmd *cobra.Command, args []string) {
 					if ctx.Err() != nil {
 						return
 					}
-					log.Printf("读取任务失败: %v", err)
+					logger.Debug("read_tasks_error error=%v", err)
 					time.Sleep(time.Second)
 					continue
 				}
@@ -178,8 +179,7 @@ func runConsumer(cmd *cobra.Command, args []string) {
 
 	// 等待退出信号
 	<-sigCh
-	log.Println()
-	log.Println("收到退出信号，正在优雅关闭...")
+	logger.Info("signal_received action=shutdown")
 
 	// 取消 context
 	cancel()
@@ -196,28 +196,24 @@ func runConsumer(cmd *cobra.Command, args []string) {
 
 	select {
 	case <-done:
-		log.Println("所有任务已完成")
+		logger.Info("all_tasks_completed")
 	case <-time.After(5 * time.Second):
-		log.Println("等待超时，强制退出")
+		logger.Warn("shutdown_timeout")
 	}
 
 	// 关闭 Redis 连接
 	stream.Close()
 
 	// 打印统计
-	elapsed := time.Since(startupTime).Round(time.Second)
-	log.Println()
-	log.Println("========== Consumer 统计 ==========")
-	log.Printf("运行时长: %s", elapsed)
-	log.Printf("处理总数: %d", atomic.LoadInt64(&totalProcessed))
-	log.Printf("成功: %d", atomic.LoadInt64(&totalSuccess))
-	log.Printf("失败: %d", atomic.LoadInt64(&totalFailed))
-	log.Println("====================================")
-	log.Println("Consumer 已退出")
+	elapsed := time.Since(startupTime)
+	logger.Info("consumer_shutdown elapsed=%s total=%d success=%d failed=%d",
+		formatDuration(elapsed),
+		atomic.LoadInt64(&totalProcessed),
+		atomic.LoadInt64(&totalSuccess),
+		atomic.LoadInt64(&totalFailed))
 }
 
 // processTask 处理单个任务，返回是否成功
-// 失败任务直接丢弃，不重试
 func processTask(ctx context.Context, stream *internalredis.Stream, task internalredis.Task) bool {
 	logger := logging.NewLogger("consumer")
 	taskStartTime := time.Now()
@@ -238,14 +234,13 @@ func processTask(ctx context.Context, stream *internalredis.Stream, task interna
 	waitStart := time.Now()
 	logger.Debug("waiting_for_input_file path=%s", task.InputPath)
 	if err := waitForFileWithContext(ctx, task.InputPath, 30*time.Second); err != nil {
-		// duration := time.Since(waitStart)
 		logger.TaskFailed(task.ID, fmt.Sprintf("input_file_unavailable: %v", err), time.Since(taskStartTime))
 		if task.MessageID != "" {
 			stream.Acknowledge(internalredis.DefaultConsumerGroup, task.MessageID)
 		}
 		return false
 	}
-	logger.Debug("input_file_ready duration=%s", time.Since(waitStart))
+	logger.Debug("input_file_ready wait_time=%s", formatDuration(time.Since(waitStart)))
 
 	// 确保输出目录存在
 	if err := os.MkdirAll(task.OutputDir, 0755); err != nil {
@@ -262,7 +257,6 @@ func processTask(ctx context.Context, stream *internalredis.Stream, task interna
 	logger.Debug("ffmpeg_start input=%s output=%s", task.InputPath, outputPath)
 	encodeStart := time.Now()
 	if err := runFFmpegWithTimeout(ctx, task.InputPath, outputPath, task.FFmpegArgs, 60*time.Minute); err != nil {
-		// encodeDuration := time.Since(encodeStart)
 		logger.TaskFailed(task.ID, fmt.Sprintf("ffmpeg_failed: %v", err), time.Since(taskStartTime))
 		os.Remove(outputPath)
 		if task.MessageID != "" {
@@ -270,8 +264,7 @@ func processTask(ctx context.Context, stream *internalredis.Stream, task interna
 		}
 		return false
 	}
-	encodeDuration := time.Since(encodeStart)
-	logger.Debug("ffmpeg_complete duration=%s", encodeDuration)
+	logger.Debug("ffmpeg_complete encode_time=%s", formatDuration(time.Since(encodeStart)))
 
 	// 校验输出
 	if task.VerifyOutput {
@@ -285,7 +278,7 @@ func processTask(ctx context.Context, stream *internalredis.Stream, task interna
 			}
 			return false
 		}
-		logger.Debug("verify_output_complete duration=%s", time.Since(verifyStart))
+		logger.Debug("verify_output_complete verify_time=%s", formatDuration(time.Since(verifyStart)))
 	}
 
 	// 删除源文件（在 ACK 之前）
@@ -310,13 +303,14 @@ func processTask(ctx context.Context, stream *internalredis.Stream, task interna
 	}
 
 	// 获取输出文件大小
-	outputInfo, _ := os.Stat(outputPath)
-	outputSize := int64(0)
-	if outputInfo != nil {
-		outputSize = outputInfo.Size()
+	var outputSize string
+	if info, err := os.Stat(outputPath); err == nil {
+		outputSize = formatFileSize(info.Size())
 	}
 
-	logger.TaskSuccess(task.ID, time.Since(taskStartTime), fmt.Sprintf("%d", outputSize))
+	totalDuration := time.Since(taskStartTime)
+	logger.TaskSuccess(task.ID, totalDuration, outputSize)
+
 	return true
 }
 
@@ -365,7 +359,8 @@ func waitForFileWithContext(ctx context.Context, path string, timeout time.Durat
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
-	return fmt.Errorf("等待文件超时 (%s): %s", timeout, path)
+
+	return fmt.Errorf("等待文件超时")
 }
 
 // runFFmpegWithTimeout 带超时的 FFmpeg 执行
@@ -384,13 +379,6 @@ func runFFmpegWithTimeout(ctx context.Context, input, output, ffmpegArgs string,
 	cmd := exec.CommandContext(timeoutCtx, "ffmpeg", args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-
-	// 打印命令（截断显示）
-	cmdStr := "ffmpeg " + strings.Join(args, " ")
-	if len(cmdStr) > 100 {
-		cmdStr = cmdStr[:97] + "..."
-	}
-	log.Printf("ffmpeg_cmd %s", cmdStr)
 
 	err := cmd.Run()
 	if timeoutCtx.Err() == context.DeadlineExceeded {
@@ -442,5 +430,22 @@ func formatFileSize(size int64) string {
 		return fmt.Sprintf("%.2f KB", float64(size)/float64(KB))
 	default:
 		return fmt.Sprintf("%d B", size)
+	}
+}
+
+// formatDuration 格式化时长，保留3位小数
+func formatDuration(d time.Duration) string {
+	totalSeconds := d.Seconds()
+
+	if totalSeconds < 1 {
+		return fmt.Sprintf("%dms", d.Milliseconds())
+	} else if totalSeconds < 60 {
+		return fmt.Sprintf("%.3fs", totalSeconds)
+	} else if totalSeconds < 3600 {
+		minutes := totalSeconds / 60
+		return fmt.Sprintf("%.3fm", minutes)
+	} else {
+		hours := totalSeconds / 3600
+		return fmt.Sprintf("%.3fh", hours)
 	}
 }

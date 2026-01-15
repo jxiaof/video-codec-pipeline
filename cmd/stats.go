@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"video-codec-pipeline/internal/config"
+	"video-codec-pipeline/internal/logging"
 	internalredis "video-codec-pipeline/internal/redis"
 )
 
@@ -47,9 +48,12 @@ func init() {
 	statsCmd.Flags().BoolVar(&showPending, "pending", false, "显示 pending 任务列表")
 	statsCmd.Flags().BoolVar(&showConsumer, "consumers", false, "显示消费者信息")
 	statsCmd.Flags().StringVarP(&configFile, "config", "c", "", "配置文件")
+	statsCmd.Flags().StringVar(&logLevel, "log-level", "info", "日志级别: debug/info/warn/error")
 }
 
 func runStats(cmd *cobra.Command, args []string) {
+	logging.SetLogLevel(logLevel)
+
 	var cfg *config.Config
 	if configFile != "" {
 		cfg, _ = config.LoadConfig(configFile)
