@@ -2,6 +2,7 @@ package redis
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"time"
 
@@ -13,11 +14,16 @@ const (
 	DefaultConsumerGroup = "gpu_encoders"
 	MaxRetryCount        = 3
 	MaxStreamLength      = 1000 // 保留最近 1000 条消息
+
+	// 任务发布速率限制：每秒最多发布 100 个任务
+	PublishRateLimit = 100
+	PublishWindow    = time.Second
 )
 
 type Stream struct {
-	Client *goredis.Client
-	Ctx    context.Context
+	Client         *goredis.Client
+	Ctx            context.Context
+	publishLimiter *RateLimiter // 发布速率限制
 }
 
 // Task 任务结构 - 由 Producer 完全定义
@@ -48,13 +54,53 @@ type QueueInfo struct {
 	Groups  int   // 消费者组数
 }
 
+// RateLimiter 速率限制器
+type RateLimiter struct {
+	tokens    int64
+	maxTokens int64
+	lastRefil time.Time
+	window    time.Duration
+}
+
+// NewRateLimiter 创建速率限制器
+func NewRateLimiter(maxPerSecond int64) *RateLimiter {
+	return &RateLimiter{
+		tokens:    maxPerSecond,
+		maxTokens: maxPerSecond,
+		lastRefil: time.Now(),
+		window:    time.Second,
+	}
+}
+
+// Allow 检查是否允许
+func (rl *RateLimiter) Allow() bool {
+	now := time.Now()
+	elapsed := now.Sub(rl.lastRefil)
+
+	// 补充令牌
+	if elapsed >= rl.window {
+		rl.tokens = rl.maxTokens
+		rl.lastRefil = now
+	}
+
+	if rl.tokens > 0 {
+		rl.tokens--
+		return true
+	}
+	return false
+}
+
 func NewStream(addr, password string, db int) *Stream {
 	rdb := goredis.NewClient(&goredis.Options{
 		Addr:     addr,
 		Password: password,
 		DB:       db,
 	})
-	return &Stream{Client: rdb, Ctx: context.Background()}
+	return &Stream{
+		Client:         rdb,
+		Ctx:            context.Background(),
+		publishLimiter: NewRateLimiter(PublishRateLimit),
+	}
 }
 
 // CreateConsumerGroup 创建消费者组
@@ -66,8 +112,16 @@ func (s *Stream) CreateConsumerGroup(stream, group string) error {
 	return nil
 }
 
-// Publish 发布任务
+// Publish 发布任务（带速率限制）
 func (s *Stream) Publish(task Task) (string, error) {
+	if !s.publishLimiter.Allow() {
+		// 速率限制，睡眠后重试
+		time.Sleep(10 * time.Millisecond)
+		if !s.publishLimiter.Allow() {
+			return "", fmt.Errorf("publish rate limited")
+		}
+	}
+
 	return s.Client.XAdd(s.Ctx, &goredis.XAddArgs{
 		Stream: DefaultStreamName,
 		Values: map[string]interface{}{

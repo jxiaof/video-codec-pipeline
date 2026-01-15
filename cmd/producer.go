@@ -18,6 +18,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"video-codec-pipeline/internal/config"
+	"video-codec-pipeline/internal/logging"
 	internalredis "video-codec-pipeline/internal/redis"
 )
 
@@ -87,6 +88,8 @@ func init() {
 }
 
 func runProducer(cmd *cobra.Command, args []string) {
+	logger := logging.NewLogger("producer")
+
 	// 加载配置文件
 	var cfg *config.Config
 	if configFile != "" {
@@ -171,13 +174,8 @@ func runProducer(cmd *cobra.Command, args []string) {
 
 	localIP := getLocalIP()
 
-	log.Printf("Producer 已启动")
-	log.Printf("  监听目录:   %s", watchDir)
-	log.Printf("  共享存储:   %s", sharedDir)
-	log.Printf("  输出目录:   %s", outputDir)
-	log.Printf("  监听模式:   %s", watchMode)
-	log.Printf("  FFmpeg:     %s", truncateStrProducer(finalFFmpegArgs, 60))
-	log.Printf("  校验输出:   %v", verifyOutput)
+	logger.Info("producer_start watch_dir=%s shared_dir=%s output_dir=%s", watchDir, sharedDir, outputDir)
+	logger.Info("config mode=%s ffmpeg_preset=%s verify_output=%v", watchMode, ffmpegPreset, verifyOutput)
 
 	taskConfig := &taskConfiguration{
 		outputDir:    outputDir,
@@ -356,36 +354,39 @@ func processExistingFiles(ctx context.Context, stream *internalredis.Stream, cfg
 }
 
 func handleNewFile(ctx context.Context, stream *internalredis.Stream, filePath string, cfg *taskConfiguration) {
-	// 等待文件写入完成
-	if err := waitFileStable(filePath, 3, 500*time.Millisecond); err != nil {
-		log.Printf("文件不可用: %v", err)
-		return
-	}
-
+	logger := logging.NewLogger("producer")
 	originalName := filepath.Base(filePath)
 	taskID := fmt.Sprintf("task_%d", time.Now().UnixNano())
 
-	// 共享存储：保持原文件名
+	logger.Debug("new_file_detected path=%s", filePath)
+
+	// 等待文件写入完成
+	if err := waitFileStable(filePath, 3, 500*time.Millisecond); err != nil {
+		logger.Error("file_unstable path=%s error=%v", filePath, err)
+		return
+	}
+
 	sharedFilePath := filepath.Join(sharedDir, originalName)
 
-	// 检查共享存储是否已存在同名文件
+	// 检查重复
 	if _, err := os.Stat(sharedFilePath); err == nil {
-		// 文件已存在，添加时间戳
 		ext := filepath.Ext(originalName)
 		base := strings.TrimSuffix(originalName, ext)
 		sharedFilePath = filepath.Join(sharedDir, fmt.Sprintf("%s_%d%s", base, time.Now().UnixNano(), ext))
+		logger.Debug("file_exists_adding_timestamp new_path=%s", sharedFilePath)
 	}
 
-	// 移动或复制文件
+	// 移动文件
 	if err := moveOrCopy(filePath, sharedFilePath, cfg.keepLocal); err != nil {
-		log.Printf("传输文件失败: %v", err)
+		logger.Error("file_transfer_failed src=%s dst=%s error=%v", filePath, sharedFilePath, err)
 		return
 	}
+	logger.Debug("file_transferred src=%s dst=%s", filePath, sharedFilePath)
 
 	// 生成输出文件名
 	outputName := generateOutputName(originalName, cfg.outputPrefix)
 
-	// 构建任务
+	// 发布任务
 	task := internalredis.Task{
 		ID:           taskID,
 		InputPath:    sharedFilePath,
@@ -398,14 +399,12 @@ func handleNewFile(ctx context.Context, stream *internalredis.Stream, filePath s
 	}
 
 	if _, err := stream.Publish(task); err != nil {
-		log.Printf("发布任务失败: %v", err)
+		logger.Error("task_publish_failed task_id=%s error=%v", taskID, err)
 		os.Remove(sharedFilePath) // 回滚
 		return
 	}
 
-	log.Printf("任务已发布: %s", originalName)
-	log.Printf("  输入: %s", sharedFilePath)
-	log.Printf("  输出: %s/%s", cfg.outputDir, outputName)
+	logger.Info("task_published task_id=%s original_name=%s output=%s/%s", taskID, originalName, cfg.outputDir, outputName)
 }
 
 // generateOutputName 生成输出文件名

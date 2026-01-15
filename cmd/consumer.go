@@ -17,6 +17,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"video-codec-pipeline/internal/config"
+	"video-codec-pipeline/internal/logging"
 	internalredis "video-codec-pipeline/internal/redis"
 )
 
@@ -218,114 +219,104 @@ func runConsumer(cmd *cobra.Command, args []string) {
 // processTask 处理单个任务，返回是否成功
 // 失败任务直接丢弃，不重试
 func processTask(ctx context.Context, stream *internalredis.Stream, task internalredis.Task) bool {
+	logger := logging.NewLogger("consumer")
 	taskStartTime := time.Now()
 
-	// 打印任务信息
-	log.Println()
-	log.Printf("┌─────────────────────────────────────────────────────")
-	log.Printf("│ 任务开始: %s", task.ID)
-	log.Printf("│ 原始文件: %s", task.OriginalName)
-	log.Printf("│ 输入路径: %s", task.InputPath)
-	log.Printf("│ 输出目录: %s", task.OutputDir)
-	log.Printf("│ 输出文件: %s", task.OutputName)
-	log.Printf("├─────────────────────────────────────────────────────")
+	logger.TaskStart(task.ID, task.OriginalName)
+	logger.Debug("input_path=%s output_path=%s/%s", task.InputPath, task.OutputDir, task.OutputName)
 
 	// 检查 context 是否已取消
 	if ctx.Err() != nil {
-		log.Printf("│ [取消] 任务被取消")
-		log.Printf("└─────────────────────────────────────────────────────")
+		logger.TaskFailed(task.ID, "context_cancelled", time.Since(taskStartTime))
+		if task.MessageID != "" {
+			stream.Acknowledge(internalredis.DefaultConsumerGroup, task.MessageID)
+		}
 		return false
 	}
 
-	// 等待文件可读（带超时和取消）
+	// 等待文件可读
 	waitStart := time.Now()
-	log.Printf("│ [等待] 检查输入文件...")
+	logger.Debug("waiting_for_input_file path=%s", task.InputPath)
 	if err := waitForFileWithContext(ctx, task.InputPath, 30*time.Second); err != nil {
-		waitDuration := time.Since(waitStart).Round(time.Millisecond)
-		log.Printf("│ [失败] 文件不可用 (耗时: %s)", waitDuration)
-		log.Printf("│ [错误] %v", err)
-		log.Printf("│ [丢弃] 任务失败，直接丢弃不重试")
-		log.Printf("│ 总耗时: %s", time.Since(taskStartTime).Round(time.Millisecond))
-		log.Printf("└─────────────────────────────────────────────────────")
-		stream.Acknowledge(internalredis.DefaultConsumerGroup, task.MessageID)
+		// duration := time.Since(waitStart)
+		logger.TaskFailed(task.ID, fmt.Sprintf("input_file_unavailable: %v", err), time.Since(taskStartTime))
+		if task.MessageID != "" {
+			stream.Acknowledge(internalredis.DefaultConsumerGroup, task.MessageID)
+		}
 		return false
 	}
-	waitDuration := time.Since(waitStart).Round(time.Millisecond)
-	log.Printf("│ [完成] 文件就绪 (耗时: %s)", waitDuration)
+	logger.Debug("input_file_ready duration=%s", time.Since(waitStart))
 
 	// 确保输出目录存在
 	if err := os.MkdirAll(task.OutputDir, 0755); err != nil {
-		log.Printf("│ [失败] 创建输出目录失败: %v", err)
-		log.Printf("│ [丢弃] 任务失败，直接丢弃不重试")
-		log.Printf("│ 总耗时: %s", time.Since(taskStartTime).Round(time.Millisecond))
-		log.Printf("└─────────────────────────────────────────────────────")
-		stream.Acknowledge(internalredis.DefaultConsumerGroup, task.MessageID)
+		logger.TaskFailed(task.ID, fmt.Sprintf("mkdir_failed: %v", err), time.Since(taskStartTime))
+		if task.MessageID != "" {
+			stream.Acknowledge(internalredis.DefaultConsumerGroup, task.MessageID)
+		}
 		return false
 	}
 
 	outputPath := filepath.Join(task.OutputDir, task.OutputName)
 
-	// 执行 FFmpeg（带超时）
-	log.Printf("│ [编码] 开始执行 FFmpeg...")
+	// 执行 FFmpeg
+	logger.Debug("ffmpeg_start input=%s output=%s", task.InputPath, outputPath)
 	encodeStart := time.Now()
 	if err := runFFmpegWithTimeout(ctx, task.InputPath, outputPath, task.FFmpegArgs, 60*time.Minute); err != nil {
-		encodeDuration := time.Since(encodeStart).Round(time.Second)
-		log.Printf("│ [失败] 编码失败 (耗时: %s)", encodeDuration)
-		log.Printf("│ [错误] %v", err)
-		log.Printf("│ [丢弃] 任务失败，直接丢弃不重试")
-		log.Printf("│ 总耗时: %s", time.Since(taskStartTime).Round(time.Second))
-		log.Printf("└─────────────────────────────────────────────────────")
+		// encodeDuration := time.Since(encodeStart)
+		logger.TaskFailed(task.ID, fmt.Sprintf("ffmpeg_failed: %v", err), time.Since(taskStartTime))
 		os.Remove(outputPath)
-		stream.Acknowledge(internalredis.DefaultConsumerGroup, task.MessageID)
+		if task.MessageID != "" {
+			stream.Acknowledge(internalredis.DefaultConsumerGroup, task.MessageID)
+		}
 		return false
 	}
-	encodeDuration := time.Since(encodeStart).Round(time.Second)
-	log.Printf("│ [完成] 编码成功 (耗时: %s)", encodeDuration)
+	encodeDuration := time.Since(encodeStart)
+	logger.Debug("ffmpeg_complete duration=%s", encodeDuration)
 
-	// 校验（如果 Producer 要求）
+	// 校验输出
 	if task.VerifyOutput {
-		log.Printf("│ [校验] 验证输出文件...")
+		logger.Debug("verify_output_start")
 		verifyStart := time.Now()
 		if err := verifyOutputFile(outputPath); err != nil {
-			verifyDuration := time.Since(verifyStart).Round(time.Millisecond)
-			log.Printf("│ [失败] 校验失败 (耗时: %s)", verifyDuration)
-			log.Printf("│ [错误] %v", err)
-			log.Printf("│ [丢弃] 任务失败，直接丢弃不重试")
-			log.Printf("│ 总耗时: %s", time.Since(taskStartTime).Round(time.Second))
-			log.Printf("└─────────────────────────────────────────────────────")
+			logger.TaskFailed(task.ID, fmt.Sprintf("verify_failed: %v", err), time.Since(taskStartTime))
 			os.Remove(outputPath)
-			stream.Acknowledge(internalredis.DefaultConsumerGroup, task.MessageID)
+			if task.MessageID != "" {
+				stream.Acknowledge(internalredis.DefaultConsumerGroup, task.MessageID)
+			}
 			return false
 		}
-		verifyDuration := time.Since(verifyStart).Round(time.Millisecond)
-		log.Printf("│ [完成] 校验通过 (耗时: %s)", verifyDuration)
+		logger.Debug("verify_output_complete duration=%s", time.Since(verifyStart))
+	}
+
+	// 删除源文件（在 ACK 之前）
+	if err := os.Remove(task.InputPath); err != nil {
+		logger.Warn("delete_input_file_failed path=%s error=%v", task.InputPath, err)
+	} else {
+		logger.Debug("input_file_deleted path=%s", task.InputPath)
+	}
+
+	// 记录历史（在 ACK 之前）
+	historyMgr := internalredis.NewHistoryManager(stream.Client, 7)
+	if err := historyMgr.RecordTaskComplete(task.ID, outputPath); err != nil {
+		logger.Warn("record_history_failed task_id=%s error=%v", task.ID, err)
+	}
+
+	// 最后 ACK（确保前面都成功才标记完成）
+	if task.MessageID != "" {
+		if err := stream.Acknowledge(internalredis.DefaultConsumerGroup, task.MessageID); err != nil {
+			logger.Error("task_ack_failed task_id=%s error=%v", task.ID, err)
+			return false
+		}
 	}
 
 	// 获取输出文件大小
-	var outputSize string
-	if info, err := os.Stat(outputPath); err == nil {
-		outputSize = formatFileSize(info.Size())
+	outputInfo, _ := os.Stat(outputPath)
+	outputSize := int64(0)
+	if outputInfo != nil {
+		outputSize = outputInfo.Size()
 	}
 
-	// 删除源文件
-	if err := os.Remove(task.InputPath); err != nil {
-		log.Printf("│ [警告] 删除源文件失败: %v", err)
-	} else {
-		log.Printf("│ [清理] 已删除源文件")
-	}
-
-	// ACK
-	stream.Acknowledge(internalredis.DefaultConsumerGroup, task.MessageID)
-
-	totalDuration := time.Since(taskStartTime).Round(time.Second)
-	log.Printf("├─────────────────────────────────────────────────────")
-	log.Printf("│ [成功] 任务完成!")
-	log.Printf("│ 输出文件: %s", outputPath)
-	log.Printf("│ 文件大小: %s", outputSize)
-	log.Printf("│ 编码耗时: %s", encodeDuration)
-	log.Printf("│ 总耗时:   %s", totalDuration)
-	log.Printf("└─────────────────────────────────────────────────────")
-
+	logger.TaskSuccess(task.ID, time.Since(taskStartTime), fmt.Sprintf("%d", outputSize))
 	return true
 }
 
@@ -399,7 +390,7 @@ func runFFmpegWithTimeout(ctx context.Context, input, output, ffmpegArgs string,
 	if len(cmdStr) > 100 {
 		cmdStr = cmdStr[:97] + "..."
 	}
-	log.Printf("│ [命令] %s", cmdStr)
+	log.Printf("ffmpeg_cmd %s", cmdStr)
 
 	err := cmd.Run()
 	if timeoutCtx.Err() == context.DeadlineExceeded {
