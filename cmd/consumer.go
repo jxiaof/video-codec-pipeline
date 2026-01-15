@@ -43,7 +43,10 @@ Consumer 只负责执行。失败任务直接丢弃，不会重试。
 
   # 多 GPU 部署
   CUDA_VISIBLE_DEVICES=0 vcp consumer -n gpu0
-  CUDA_VISIBLE_DEVICES=1 vcp consumer -n gpu1`,
+  CUDA_VISIBLE_DEVICES=1 vcp consumer -n gpu1
+  
+  # 调试模式
+  vcp consumer --log-level debug`,
 	Run: runConsumer,
 }
 
